@@ -1,0 +1,10 @@
+# Local (non-Colab) setup. Use Python 3.10: the pins in requirements.txt have no wheels for 3.12+.
+# torch is not listed here because Colab preinstalls it. Install it first, from the CUDA 12.6 index,
+# which still supports older GPUs such as the GTX 10xx (Pascal) series:
+#   py -3.10 -m venv .venv
+#   .venv\Scripts\python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
+#   .venv\Scripts\python -m pip install -r requirements-local.txt
+-r requirements.txt
+numpy<2          # pandas 1.4.3 / matplotlib 3.5.3 / opencv 4.6 binaries break on numpy 2
+transformers<5   # source/stable_diffusion.py relies on the v4 CLIPTokenizer/CLIPTextModel classes
+ipykernel
