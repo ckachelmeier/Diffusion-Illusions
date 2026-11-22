@@ -1,0 +1,39 @@
+# Example batch config for generate.py. Runs go in order, sharing one loaded model:
+#     python generate.py --config runs.example.yaml --dry-run    (check it and list the runs)
+#     python generate.py --config runs.example.yaml
+#
+# Any setting from illusion_gen/config.py works in `defaults` (applies to every run) or in a run entry (overrides
+# defaults). Command line options given with --config override both, e.g. --steps 20 for a quick test.
+# Extra keys for run entries:
+#     repeat: N        Do this entry N times (N separate new runs; see batch.bat)
+#     resume: ...      A run folder, or a list of folders and/or patterns with *, each continued (see continue.bat)
+# Paths are relative to the folder you run generate.py from. Use forward slashes, or single quotes around
+# backslashes: in double quotes YAML reads \u... as an escape code.
+#
+# Ctrl+C saves the current run and stops the batch. A run that fails is reported, and the batch moves on.
+
+defaults:
+  illusion: twisting_squares
+  negative_prompt: blurry ugly
+  steps: 1000
+
+runs:
+  # Several new runs with the same prompts, to pick the best one (like batch.bat)
+  - prompts:
+      - A cute bunny in a forest meadow Modern Disney style
+      - A beautiful unicorn in a forest meadow Modern Disney style
+    repeat: 3
+
+  # A different illusion type with its own settings
+  - illusion: flip
+    prompts:
+      - A snowy mountain village at night, oil painting
+      - A bowl of fruit on a wooden table, oil painting
+    steps: 2000
+    guidance_scale: 60
+
+  # Continue earlier runs (like continue.bat). Prompts and illusion come from each run's checkpoint.
+  # - resume:
+  #     - untracked/twisting_squares_runs/A cute bunny in a forest meadow Modern Disney style-A beautiful unicorn in a forest meadow Modern Disney style_20261121T135501
+  #     - untracked/twisting_squares_runs/A cute bunny*   # every run folder starting with "A cute bunny"
+  #   steps: 5000
