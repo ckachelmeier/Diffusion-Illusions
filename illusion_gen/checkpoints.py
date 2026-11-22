@@ -5,6 +5,11 @@ import torch
 
 CHECKPOINT_NAME = 'checkpoint.pt'
 
+#Target weights were rescaled (same as in gen.py). Checkpoints saved before that have no 'weight_scale' in their target
+#and used weights 1/0.03 times smaller; current ones save weight_scale=2.
+CURRENT_TARGET_WEIGHT_SCALE = 2
+OLD_TARGET_WEIGHT_FACTOR = 1 / 0.03
+
 
 def load_checkpoint(folder):
     #Returns the checkpoint as a dict in the current format, or None if the folder has none.

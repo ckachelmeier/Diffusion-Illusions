@@ -19,6 +19,7 @@ DEFAULT_PROMPTS = ["A cute bunny in a forest meadow Modern Disney style",
 DEFAULT_TARGET_VIEW = 'a'
 DEFAULT_TARGET_WEIGHT = 1.0
 DEFAULT_TARGET_BLUR = 4.0
+DEFAULT_TARGET_DETAIL = 0.1
 
 
 @dataclass
@@ -39,6 +40,14 @@ class RunConfig:
     min_step: int = 10
     seed: Optional[int] = None       #Set for repeatable runs
 
+    #Settling: once the layout has formed, gradually lower the highest noise level and the learning rate so the image
+    #stops shifting around and only refines its detail. Based on the absolute step, so resuming continues the schedule.
+    settle: bool = True              #False = keep max_step and lr constant for the whole run
+    settle_start: int = 1000         #Step where settling begins (full strength before it)
+    settle_end: int = 4000           #Step where settling ends; the settled values are kept after it
+    settle_max_step: int = 400       #Highest noise level used from settle_end on (never above max_step)
+    settle_lr: float = 0.2           #Learning rate from settle_end on, as a fraction of lr
+
     #Starting point
     resume: Optional[str] = None     #Continue a stopped run in this folder (exact with checkpoint.pt; approximate restart from image_a.png without)
     init_image: Optional[str] = None #Retrain the network to reproduce this picture before training (e.g. an edited image_a.png)
@@ -48,8 +57,9 @@ class RunConfig:
     #Target picture: train one view toward a picture instead of its prompt (pixel loss after blurring both)
     target_image: Optional[str] = None
     target_view: Optional[str] = None    #Default 'a'
-    target_weight: Optional[float] = None #Default 1.0. Higher = closer match, less room for the other views
+    target_weight: Optional[float] = None #Default 1.0: the target view stays recognizable (~4% off the blurred picture) while the other views still form their subjects. ~3 = clean match, but the other views mostly lose theirs
     target_blur: Optional[float] = None   #Default 4.0 px (of 256). 0 = match every pixel
+    target_detail: Optional[float] = None #Default 0.1: extra pull toward the unblurred picture, relative to the blurred one. Keeps fine detail from turning into noisy dots. Higher (0.3) = sharper target view; 0 = off
 
     #Output
     output_root: str = 'untracked'   #Runs are saved in <output_root>/<illusion>_runs/<name>
@@ -115,12 +125,25 @@ class RunConfig:
         number('max_step', int, 0)
         number('min_step', int, 0)
         number('seed', int, optional=True)
+        number('settle_start', int, 0)
+        number('settle_end', int, 0)
+        number('settle_max_step', int, 0)
+        number('settle_lr', float, 0)
         number('fit_steps', int, 0)
         number('target_weight', float, 0, optional=True)
         number('target_blur', float, 0, optional=True)
+        number('target_detail', float, 0, optional=True)
         number('save_interval', int, 1)
         if not self.min_step <= self.max_step < 1000:
             fail('need min_step <= max_step < 1000, not min_step=%r, max_step=%r' % (self.min_step, self.max_step))
+        if not isinstance(self.settle, bool):
+            fail('settle must be true or false, not %r' % (self.settle,))
+        if self.settle_end <= self.settle_start:
+            fail('settle_end must be after settle_start, not settle_start=%r, settle_end=%r' % (self.settle_start, self.settle_end))
+        if self.settle_max_step < self.min_step:
+            fail('settle_max_step must be at least min_step (%r), not %r' % (self.min_step, self.settle_max_step))
+        if not 0 < self.settle_lr <= 1:
+            fail('settle_lr is a fraction of lr: it must be above 0 and at most 1, not %r' % (self.settle_lr,))
 
         if isinstance(self.save_memory, str):
             lowered = self.save_memory.lower()

@@ -63,6 +63,15 @@ def make_parser():
     training.add_argument('--min-step', type=int, help='Lowest noise level used in training (default 10).')
     training.add_argument('--seed', type=int, help='Random seed, for repeatable runs.')
 
+    settle = parser.add_argument_group('settling', 'Once the layout has formed, the highest noise level and the learning rate are gradually lowered, '
+                                       'so the image stops shifting around and only refines its detail. The schedule follows the run\'s total step '
+                                       'count, so resuming picks it up where it left off.')
+    settle.add_argument('--no-settle', dest='settle', action='store_const', const=False, help='Keep --max-step and --lr constant for the whole run.')
+    settle.add_argument('--settle-start', type=int, metavar='STEP', help='Step where settling begins (default 1000).')
+    settle.add_argument('--settle-end', type=int, metavar='STEP', help='Step where settling ends; the settled values are kept after it (default 4000).')
+    settle.add_argument('--settle-max-step', type=int, metavar='LEVEL', help='Highest noise level from --settle-end on (default 400, never above --max-step).')
+    settle.add_argument('--settle-lr', type=float, metavar='FRACTION', help='Learning rate from --settle-end on, as a fraction of --lr (default 0.2).')
+
     start = parser.add_argument_group('starting point')
     start.add_argument('--resume', metavar='RUN_FOLDER', help='Continue a stopped run in this folder. Exact if it has checkpoint.pt (whose prompts and illusion are used); '
                        'for older runs without one, it first retrains the network to reproduce the run\'s image_a.png (close, but not identical).')
@@ -75,8 +84,13 @@ def make_parser():
     target.add_argument('--target-image', metavar='PICTURE', help='Train one view to look like this picture instead of its prompt. The other views still follow their prompts. '
                         'A new run starts from the picture. Since all views share the same pixels, the match is approximate.')
     target.add_argument('--target-view', metavar='LETTER', help='Which view the target picture is for (default a).')
-    target.add_argument('--target-weight', type=float, help='How strongly the view is pulled toward the target picture (default 1). Higher = closer match, less room for the other views.')
-    target.add_argument('--target-blur', type=float, help='Blur radius in pixels (of 256) applied to both the view and the picture before comparing them (default 4). 0 = match every pixel.')
+    target.add_argument('--target-weight', type=float, help='How strongly the view is pulled toward the target picture (default 1). 1 is tuned so the target view '
+                        'stays recognizable (~4%% off the blurred picture) while the other views still form their subjects. '
+                        'Around 3 the target view is a clean match but the other views mostly lose their subjects.')
+    target.add_argument('--target-blur', type=float, help='Blur radius in pixels (of 256) applied to both the view and the picture before comparing them (default 4). '
+                        'The view then only has to match the picture\'s overall shapes and colors, leaving fine detail free for the other views. 0 = match every pixel.')
+    target.add_argument('--target-detail', type=float, help='Strength of an extra pull toward the unblurred picture, relative to the blurred one (default 0.1). '
+                        'Keeps fine detail from turning into noisy dot texture. Higher (e.g. 0.3) = sharper target view, less room for the other views; 0 = off.')
 
     output = parser.add_argument_group('output')
     output.add_argument('--output-root', metavar='FOLDER', help='Runs are saved in FOLDER/<illusion>_runs/ (default untracked).')

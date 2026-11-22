@@ -1,5 +1,6 @@
 #One training run: generate() for calling from Python, run() for a ready-made RunConfig
 import dataclasses
+import math
 import os
 import random
 import re
@@ -12,16 +13,21 @@ import torch
 import torch.nn.functional as F
 import torchvision.transforms.functional as TF
 
-from .checkpoints import load_checkpoint, save_checkpoint
-from .config import (DEFAULT_PROMPTS, DEFAULT_TARGET_BLUR, DEFAULT_TARGET_VIEW, DEFAULT_TARGET_WEIGHT, ConfigError,
-                     RunConfig)
+from .checkpoints import CURRENT_TARGET_WEIGHT_SCALE, OLD_TARGET_WEIGHT_FACTOR, load_checkpoint, save_checkpoint
+from .config import (DEFAULT_PROMPTS, DEFAULT_TARGET_BLUR, DEFAULT_TARGET_DETAIL, DEFAULT_TARGET_VIEW,
+                     DEFAULT_TARGET_WEIGHT, ConfigError, RunConfig)
+from .env import fix_colorama
 from .illusions import ILLUSIONS, VIEW_LETTERS, Illusion, resolve_illusion, view_index
 from .image_network import fit_to_picture, load_picture, load_state, make_image_network, state_for_checkpoint
 from .model import encode_prompts, get_model
 
-#Target picture calibration: on a GTX 1060, an SD step's gradient on the pixels averaged about the same size as the
-#target loss's gradient (without this factor of target_weight) when every pixel is off by 0.1.
-TARGET_LOSS_SCALE = 6.5e5
+fix_colorama() #Also when generate() is called from your own script, not just from generate.py
+
+#Target picture calibration: an SD step's pixel gradient is about as large as the target loss's gradient at a scale of
+#6.5e5 with every pixel off by 0.1. At that strength the other view never forms its subject, so weight 1 is 3% of it.
+#In 700-step tests (apple target, unicorn prompt, blur 4, detail 0.1), 3% gave a recognizable apple with visible
+#unicorns in the other view; 10% gave a clean apple and no unicorn.
+TARGET_LOSS_SCALE = 6.5e5 / OLD_TARGET_WEIGHT_FACTOR
 
 MAX_RUN_NAME_LENGTH = 150 #Keeps paths under Windows' 260 character limit
 
@@ -78,7 +84,7 @@ def run(config: RunConfig) -> RunResult:
     prompts, negative_prompt, model_name = c.prompts, c.negative_prompt, c.model
     illusion_spec, squares = c.illusion, c.squares
     init_image, init_view = c.init_image, c.init_view
-    target_image, target_view, target_weight, target_blur = c.target_image, c.target_view, c.target_weight, c.target_blur
+    target_image, target_view, target_weight, target_blur, target_detail = c.target_image, c.target_view, c.target_weight, c.target_blur, c.target_detail
 
     checkpoint = None
     if c.resume is not None:
@@ -103,8 +109,13 @@ def run(config: RunConfig) -> RunResult:
                 #Keep using the run's target picture, unless a different one is given
                 target_image = saved_target['path']
                 if target_view   is None: target_view   = saved_target['view']
-                if target_weight is None: target_weight = saved_target['weight']
+                if target_weight is None:
+                    target_weight = saved_target['weight']
+                    if 'weight_scale' not in saved_target:
+                        target_weight *= OLD_TARGET_WEIGHT_FACTOR
+                        print('Converted target weight %s from an older checkpoint to the current scale: %.3g' % (saved_target['weight'], target_weight))
                 if target_blur   is None: target_blur   = saved_target['blur']
+                if target_detail is None: target_detail = saved_target.get('detail', 0.0) #Older checkpoints had no detail term
         else:
             if init_image is None:
                 init_image, init_view = os.path.join(c.resume, 'image_a.png'), 'a'
@@ -133,6 +144,7 @@ def run(config: RunConfig) -> RunResult:
         target_view   = target_view   if target_view   is not None else DEFAULT_TARGET_VIEW
         target_weight = target_weight if target_weight is not None else DEFAULT_TARGET_WEIGHT
         target_blur   = target_blur   if target_blur   is not None else DEFAULT_TARGET_BLUR
+        target_detail = target_detail if target_detail is not None else DEFAULT_TARGET_DETAIL
         target_index  = view_index(target_view, illusion)
         if init_image is None and checkpoint is None:
             init_image, init_view = target_image, target_view #Start a new run from the target picture, rather than from noise
@@ -148,7 +160,7 @@ def run(config: RunConfig) -> RunResult:
         unused = '   (not used: image_%s follows the target picture)' % VIEW_LETTERS[i] if i == target_index else ''
         print('    image_%s = %r%s' % (VIEW_LETTERS[i], prompt, unused))
     if target_image is not None:
-        print('Target picture for image_%s: %r  (weight %s, blur %s px)' % (target_view, target_image, target_weight, target_blur))
+        print('Target picture for image_%s: %r  (weight %s, blur %s px, detail %s)' % (target_view, target_image, target_weight, target_blur, target_detail))
 
     s = get_model(model_name, c.half_precision, c.save_memory)
     device = s.device
@@ -172,12 +184,17 @@ def run(config: RunConfig) -> RunResult:
             return TF.gaussian_blur(img, kernel_size=kernel_size, sigma=target_blur)
 
         if target_index is not None:
-            target_blurred = blur(load_picture(target_image, device))
+            target_picture = load_picture(target_image, device)
+            target_blurred = blur(target_picture)
 
         def target_step():
-            #Instead of a Stable Diffusion step, the target view gets a plain pixel loss toward the picture (after blurring both).
-            #The gradient flows back through the view into the same network the other views use.
-            loss = target_weight * TARGET_LOSS_SCALE * F.mse_loss(blur(views[target_index]()), target_blurred)
+            #Instead of a Stable Diffusion step, the target view gets a plain pixel loss toward the picture (after blurring both),
+            #plus optionally toward its full detail. The gradient flows back through the view into the same network the other views use.
+            view = views[target_index]()
+            loss = F.mse_loss(blur(view), target_blurred)
+            if target_detail:
+                loss = loss + target_detail * F.mse_loss(view, target_picture)
+            loss = target_weight * TARGET_LOSS_SCALE * loss
             loss.backward()
 
         def target_error():
@@ -194,6 +211,16 @@ def run(config: RunConfig) -> RunResult:
 
         s.max_step = c.max_step
         s.min_step = c.min_step
+        settled_max_step = min(c.max_step, c.settle_max_step)
+
+        def settle_schedule(step):
+            #Highest noise level and learning rate factor for a step: full strength until settle_start, then a smooth
+            #(cosine) decline to the settled values at settle_end, which are kept after it
+            if not c.settle or step <= c.settle_start:
+                return c.max_step, 1.0
+            progress = min(1.0, (step - c.settle_start) / (c.settle_end - c.settle_start))
+            eased = (1 - math.cos(math.pi * progress)) / 2
+            return round(c.max_step + (settled_max_step - c.max_step) * eased), 1 + (c.settle_lr - 1) * eased
 
         if c.resume is not None:
             #Continue in the same folder, numbering new frames after the existing ones
@@ -212,7 +239,8 @@ def run(config: RunConfig) -> RunResult:
             #Shows what the target view is actually matched against
             rp.save_image(rp.as_numpy_image(target_blurred), os.path.join(output_folder, 'target_blurred.png'))
 
-        saved_target = None if target_image is None else dict(path=target_image, view=target_view, weight=target_weight, blur=target_blur)
+        saved_target = None if target_image is None else dict(path=target_image, view=target_view, weight=target_weight, weight_scale=CURRENT_TARGET_WEIGHT_SCALE,
+                                                              blur=target_blur, detail=target_detail)
 
         def checkpoint_now(step):
             save_checkpoint(output_folder, state_for_checkpoint(image), step, prompts, negative_prompt, illusion, model_name, saved_target)
@@ -246,6 +274,10 @@ def run(config: RunConfig) -> RunResult:
         print('Every %i steps we save an image in the form [%s], where' % (c.save_interval, ', '.join('image_' + VIEW_LETTERS[i] for i in range(len(views)))))
         for i, description in enumerate(illusion.descriptions):
             print('    image_%s = (%s)' % (VIEW_LETTERS[i], description))
+        if c.settle:
+            current_max_step, current_lr_factor = settle_schedule(start_step)
+            print('Settling from step %i to %i: highest noise level %i -> %i, learning rate x1 -> x%s (now: %i, x%.2g)'
+                  % (c.settle_start, c.settle_end, c.max_step, settled_max_step, c.settle_lr, current_max_step, current_lr_factor))
         print('Watch progress in:', os.path.abspath(os.path.join(output_folder, 'latest.png')))
         print()
         print('Press Ctrl+C at any time to stop early and save the current image')
@@ -263,6 +295,9 @@ def run(config: RunConfig) -> RunResult:
         try:
             for iter_num in range(start_step, start_step + c.steps):
                 display_eta(iter_num - start_step) #Print the remaining time
+                s.max_step, lr_factor = settle_schedule(iter_num)
+                for group in optim.param_groups:
+                    group['lr'] = c.lr * lr_factor #Applies to the target picture's pull too, so the balance between views stays the same
                 if target_index is None:
                     #Train a randomly chosen view toward its prompt
                     sd_step(random.randrange(len(views)))

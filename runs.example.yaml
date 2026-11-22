@@ -2,22 +2,97 @@
 #     python generate.py --config runs.example.yaml --dry-run    (check it and list the runs)
 #     python generate.py --config runs.example.yaml
 #
-# Any setting from illusion_gen/config.py works in `defaults` (applies to every run) or in a run entry (overrides
-# defaults). Command line options given with --config override both, e.g. --steps 20 for a quick test.
-# Extra keys for run entries:
-#     repeat: N        Do this entry N times (N separate new runs; see batch.bat)
-#     resume: ...      A run folder, or a list of folders and/or patterns with *, each continued (see continue.bat)
-# Paths are relative to the folder you run generate.py from. Use forward slashes, or single quotes around
-# backslashes: in double quotes YAML reads \u... as an escape code.
+# HOW SETTINGS COMBINE (highest first):
+#     command line options given with --config  >  the run entry  >  defaults  >  built-in defaults
+#     e.g. "python generate.py --config runs.example.yaml --steps 20" runs every entry for just 20 steps, as a quick test.
+# The same names work as command line options (with - instead of _, e.g. --target-image) and as generate() arguments.
+# A misspelled setting is reported as an error rather than ignored.
+#
+# PATHS are relative to the folder you run generate.py from. Use forward slashes, or single quotes around backslashes:
+# inside double quotes YAML reads \u... as an escape code.
 #
 # Ctrl+C saves the current run and stops the batch. A run that fails is reported, and the batch moves on.
 
-defaults:
-  illusion: twisting_squares
-  negative_prompt: blurry ugly
-  steps: 1000
 
+# ---------------------------------------------------------------------------------------------------------------------
+# defaults: settings for every run. Every available setting is listed below with its built-in default; uncomment a line
+# to change it for all runs, or copy it into a single run entry to change it for just that run.
+# ---------------------------------------------------------------------------------------------------------------------
+defaults:
+
+  # --- What to make --------------------------------------------------------------------------------------------------
+  illusion: twisting_squares   # twisting_squares (2 prompts), flip (2: right-side up, upside down), rotate (4: 0/90/180/270 degrees)
+  # squares: 5                 # twisting_squares only: a squares x squares grid
+  # prompts:                   # One per view: image_a, image_b, ... Required for new runs (except the built-in bunny/unicorn pair).
+  #   - A cute bunny in a forest meadow Modern Disney style        # image_a
+  #   - A beautiful unicorn in a forest meadow Modern Disney style # image_b
+  #                            # Tip: put "---" in a prompt to add to the negative prompt for that view only,
+  #                            #      e.g. "A red fox --- cartoon"
+  negative_prompt: blurry ugly # What you DON'T want to see, for every view
+  steps: 1000                  # Built-in default 5000. Training steps to run; when resuming, how many MORE steps
+
+  # --- Training ------------------------------------------------------------------------------------------------------
+  # weights: [1, 0.9]          # Relative strength of each prompt, one per view. Default: twisting_squares 1, 0.9; others all 1
+  # guidance_scale: 100        # How hard Stable Diffusion pushes toward the prompt (the original flip/rotate notebooks used 60)
+  # noise_coef: 0.1            # Overall strength of the Stable Diffusion training signal
+  # lr: 0.0001                 # SGD learning rate
+  # max_step: 990              # Highest noise level used, out of 1000. High levels let SD repaint the overall layout;
+  #                            # lower values (500-700) keep the composition of an init_image and only refine it
+  # min_step: 10               # Lowest noise level used
+  # seed: 1234                 # Default: none (different every time). Set it for repeatable runs
+
+  # --- Settling: once the layout has formed, lower the noise range and learning rate so the image stops shifting ------
+  # settle: true               # false = keep max_step and lr constant for the whole run
+  # settle_start: 1000         # Step where settling begins. Steps count the whole run, so resuming continues the schedule
+  # settle_end: 4000           # Step where settling ends; the settled values are kept after it
+  # settle_max_step: 400       # Highest noise level from settle_end on (never above max_step)
+  # settle_lr: 0.2             # Learning rate from settle_end on, as a fraction of lr
+
+  # --- Starting point ------------------------------------------------------------------------------------------------
+  # resume: ...                # (Run entries only, see below) continue an existing run folder
+  # init_image: untracked/twisting_squares_runs/SOME_RUN/image_a.png
+  #                            # Retrain the network to reproduce this picture before training (e.g. an image_a.png you
+  #                            # edited). On its own it starts a new run from it; with resume, it continues that run from it
+  # init_view: a               # Which view init_image shows: a = image_a, b = image_b (e.g. an edited image_b.png), ...
+  # fit_steps: 1000            # Steps used to retrain the network to reproduce init_image or target_image
+
+  # --- Target picture ------------------------------------------------------------------------------------------------
+  # Train one view to look like a picture instead of its prompt; the other views still follow their prompts. A new run
+  # starts from the picture. All views share the same pixels, so the match is approximate. When resuming a run that had
+  # a target, its saved target settings are reused unless you set them here.
+  # target_image: assets/my_picture.png
+  # target_view: a             # Which view follows the picture: a = image_a (the original image), b = image_b (twisted), ...
+  #                            # That view's prompt is then unused (but still has to be given)
+  # target_weight: 1.0         # How strongly the view is pulled toward the picture. 1 keeps it recognizable (~4% off the
+  #                            # blurred picture) while the other views still form their subjects; ~3 = clean match, but
+  #                            # the other views mostly lose theirs
+  # target_blur: 4.0           # Blur radius in pixels (of 256) applied to both the view and the picture before comparing.
+  #                            # The view then only has to match overall shapes and colors; 0 = match every pixel
+  # target_detail: 0.1         # Extra pull toward the unblurred picture, relative to the blurred one. Keeps fine detail
+  #                            # from turning into noisy dots. Higher (0.3) = sharper target view, less room for the others; 0 = off
+
+  # --- Output --------------------------------------------------------------------------------------------------------
+  # output_root: untracked     # Runs are saved in <output_root>/<illusion>_runs/<name>
+  # name: my run               # Run folder name. Default: the prompts joined with "-". If the folder already exists,
+  #                            # an ISO 8601 timestamp is added, e.g. "my run_20261122T093015"
+  # save_interval: 50          # Save a progress frame (frames/ims_NNNN.png, latest.png) and checkpoint every N steps
+
+  # --- Model and GPU memory ------------------------------------------------------------------------------------------
+  # model: stable-diffusion-v1-5/stable-diffusion-v1-5   # SD 1.5 or a dreambooth of it. When resuming, the run's saved model is used
+  # half_precision: true       # 16-bit UNet/VAE: half the memory. false = 32-bit, needs ~10 GB free GPU memory
+  # save_memory: auto          # VAE gradient checkpointing (less memory, slower steps): auto, true or false.
+  #                            # auto turns it on only if the GPU doesn't have room without it
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# runs: done in order. Each entry can use any setting above, plus:
+#     repeat: N       Do this entry N times: N separate new runs (or resuming the same folder N times in a row)
+#     resume: ...     A run folder, or a list of folders and/or patterns with *, each continued with this entry's settings.
+#                     Its checkpoint supplies the prompts, negative prompt, illusion, squares, model and target picture,
+#                     so those don't need to be given. Older runs without checkpoint.pt restart approximately from image_a.png.
+# ---------------------------------------------------------------------------------------------------------------------
 runs:
+
   # Several new runs with the same prompts, to pick the best one (like batch.bat)
   - prompts:
       - A cute bunny in a forest meadow Modern Disney style
@@ -31,9 +106,31 @@ runs:
       - A bowl of fruit on a wooden table, oil painting
     steps: 2000
     guidance_scale: 60
+    seed: 7
 
-  # Continue earlier runs (like continue.bat). Prompts and illusion come from each run's checkpoint.
+  # A target picture: image_a looks like the picture, image_b (twisted) shows a unicorn
+  # - prompts:
+  #     - An apple                 # unused: image_a follows the target picture
+  #     - A beautiful unicorn in a forest meadow Modern Disney style
+  #   target_image: assets/apple.png
+  #   target_view: a
+  #   target_weight: 1.0
+  #   target_blur: 4.0
+  #   target_detail: 0.1
+  #   steps: 700
+  #   name: apple unicorn
+
+  # Refine an edited picture: start from it and keep its composition
+  # - prompts:
+  #     - A cute bunny in a forest meadow Modern Disney style
+  #     - A beautiful unicorn in a forest meadow Modern Disney style
+  #   init_image: untracked/twisting_squares_runs/SOME_RUN/image_a_edited.png
+  #   init_view: a
+  #   max_step: 600
+  #   steps: 500
+
+  # Continue earlier runs (like continue.bat)
   # - resume:
   #     - untracked/twisting_squares_runs/A cute bunny in a forest meadow Modern Disney style-A beautiful unicorn in a forest meadow Modern Disney style_20261121T135501
-  #     - untracked/twisting_squares_runs/A cute bunny*   # every run folder starting with "A cute bunny"
+  #     - untracked/twisting_squares_runs/A beautiful mermaid*   # every run folder starting with "A beautiful mermaid"
   #   steps: 5000

@@ -21,8 +21,13 @@ def load_batch(path, overrides=None):
     Precedence, highest first: overrides (command line options) > the run entry > defaults > RunConfig defaults.
     Relative paths are relative to the current directory, like on the command line.
     """
-    with open(path, encoding='utf-8') as file:
-        data = yaml.safe_load(file)
+    try:
+        with open(path, encoding='utf-8') as file:
+            data = yaml.safe_load(file)
+    except OSError as error:
+        raise ConfigError('Could not read %s: %s' % (path, error))
+    except yaml.YAMLError as error:
+        raise ConfigError('%s is not valid YAML:\n%s' % (path, error))
     if data is None:
         raise ConfigError('%s is empty' % path)
     if isinstance(data, list):
