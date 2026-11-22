@@ -32,6 +32,13 @@ if os.path.exists(_venv_python) and os.path.normcase(os.path.realpath(sys.prefix
 sys.stdout.reconfigure(encoding='utf-8')
 sys.stderr.reconfigure(encoding='utf-8')
 
+#rp's progress display calls colorama.init() on every update, and each call wraps stdout in another layer.
+#When output is redirected to a file (e.g. python gen.py > log.txt), the layers pile up until Python's recursion
+#limit crashes the run after ~250 steps. Initialize colorama once here and make later calls do nothing.
+import colorama
+colorama.just_fix_windows_console()
+colorama.init = lambda *args, **kwargs: None
+
 #SET YOUR PROMPTS HERE
 #(When resuming a run that has a checkpoint, the prompts, negative prompt and square count saved with it are used instead)
 #prompt_a = A beautiful mermaid ocean beach Modern Disney style 4k
@@ -49,6 +56,9 @@ negative_prompt = 'blurry ugly'
 
 DEFAULT_TARGET_WEIGHT = 1.0
 DEFAULT_TARGET_BLUR = 4.0
+DEFAULT_TARGET_DETAIL = 0.1
+#Checkpoints saved before target weights were rescaled (no 'weight_scale' entry) used weights 1/0.03 times smaller
+OLD_TARGET_WEIGHT_FACTOR = 1 / 0.03
 
 parser = argparse.ArgumentParser(description='Generate a twisting squares illusion.')
 parser.add_argument('steps', nargs='?', type=int, default=5000,
@@ -73,12 +83,16 @@ parser.add_argument('--target-image', metavar='PICTURE',
 parser.add_argument('--target-view', choices=['a', 'b'],
                     help='Which view the target picture is for: a = the original image (default), b = the twisted image.')
 parser.add_argument('--target-weight', type=float,
-                    help='How strongly the view is pulled toward the target picture (default ' + str(DEFAULT_TARGET_WEIGHT) + '). At 1, the pull roughly balances '
-                         'the other prompt\'s push when the blurred view is ~10%% off the picture. Higher = closer match, less room for the other view.')
+                    help='How strongly the view is pulled toward the target picture (default ' + str(DEFAULT_TARGET_WEIGHT) + '). 1 is tuned so the target view '
+                         'stays recognizable (~4%% off the blurred picture) while the other view still forms its subject. '
+                         'Around 3 the target view is a clean match but the other view mostly loses its subject.')
 parser.add_argument('--target-blur', type=float,
                     help='Blur radius in pixels (of 256) applied to both the view and the picture before comparing them (default ' + str(DEFAULT_TARGET_BLUR) + '). '
                          'The view then only has to match the picture\'s overall shapes and colors, leaving fine detail free for the other view. '
                          '0 = match every pixel.')
+parser.add_argument('--target-detail', type=float,
+                    help='Strength of an extra pull toward the unblurred picture, relative to the blurred one (default ' + str(DEFAULT_TARGET_DETAIL) + '). '
+                         'Keeps fine detail from turning into noisy dot texture. Higher (e.g. 0.3) = sharper target view, less room for the other view; 0 = off.')
 args = parser.parse_args()
 
 import torch
@@ -101,8 +115,13 @@ if args.resume:
             #Keep using the run's target picture, unless overridden on the command line
             args.target_image = saved_target['path']
             if args.target_view   is None: args.target_view   = saved_target['view']
-            if args.target_weight is None: args.target_weight = saved_target['weight']
+            if args.target_weight is None:
+                args.target_weight = saved_target['weight']
+                if 'weight_scale' not in saved_target:
+                    args.target_weight *= OLD_TARGET_WEIGHT_FACTOR
+                    print('Converted target weight %s from an older checkpoint to the current scale: %.3g' % (saved_target['weight'], args.target_weight))
             if args.target_blur   is None: args.target_blur   = saved_target['blur']
+            if args.target_detail is None: args.target_detail = saved_target.get('detail', 0.0)
     else:
         if init_image_path is None:
             init_image_path = os.path.join(args.resume, 'image_a.png')
@@ -119,6 +138,7 @@ TARGET_IMAGE  = args.target_image
 TARGET_VIEW   = args.target_view or 'a'
 TARGET_WEIGHT = args.target_weight if args.target_weight is not None else DEFAULT_TARGET_WEIGHT
 TARGET_BLUR   = args.target_blur   if args.target_blur   is not None else DEFAULT_TARGET_BLUR
+TARGET_DETAIL = args.target_detail if args.target_detail is not None else DEFAULT_TARGET_DETAIL
 if TARGET_IMAGE is not None:
     if not os.path.exists(TARGET_IMAGE):
         sys.exit('Target picture not found: %r' % TARGET_IMAGE)
@@ -135,7 +155,7 @@ print('    prompt_a =', repr(prompt_a) + ('   (not used: image_a follows the tar
 print('    prompt_b =', repr(prompt_b) + ('   (not used: image_b follows the target picture)' if TARGET_IMAGE and TARGET_VIEW == 'b' else '')) #This will be the twisted image
 print('    NUMBER_OF_SQUARES =', NUMBER_OF_SQUARES)
 if TARGET_IMAGE:
-    print('Target picture for image_%s: %r  (weight %s, blur %s px)' % (TARGET_VIEW, TARGET_IMAGE, TARGET_WEIGHT, TARGET_BLUR))
+    print('Target picture for image_%s: %r  (weight %s, blur %s px, detail %s)' % (TARGET_VIEW, TARGET_IMAGE, TARGET_WEIGHT, TARGET_BLUR, TARGET_DETAIL))
 
 from rp import *
 import numpy as np
@@ -316,9 +336,11 @@ weights=weights*len(weights)
 
 #TARGET PICTURE: instead of a Stable Diffusion step, the target view gets a plain pixel loss toward the picture.
 #The gradient flows back through the view (e.g. through rotate_tiles) into the same network the other view uses.
-#Calibration: on a GTX 1060, an SD step's gradient on the pixels averaged about the same size as this loss's
-#gradient (without TARGET_LOSS_SCALE's factor of TARGET_WEIGHT) when every pixel is off by 0.1.
-TARGET_LOSS_SCALE = 6.5e5
+#Calibration: an SD step's pixel gradient is about as large as this loss's gradient at a scale of 6.5e5 with every
+#pixel off by 0.1. At that strength the other view never forms its subject, so weight 1 is 3% of it. In 700-step
+#tests (apple target, unicorn prompt, blur 4, detail 0.1), 3% gave a recognizable apple with visible unicorns in
+#the other view; 10% gave a clean apple and no unicorn.
+TARGET_LOSS_SCALE = 6.5e5 / OLD_TARGET_WEIGHT_FACTOR
 
 def blur(img):
     if TARGET_BLUR <= 0:
@@ -329,12 +351,16 @@ def blur(img):
 if TARGET_IMAGE is not None:
     target_index = 0 if TARGET_VIEW == 'a' else 1
     other_index = 1 - target_index
-    target_blurred = blur(load_picture(TARGET_IMAGE))
+    target_picture = load_picture(TARGET_IMAGE)
+    target_blurred = blur(target_picture)
 
 def target_step():
-    #Pull the target view toward the target picture (after blurring both)
+    #Pull the target view toward the target picture (after blurring both), plus optionally toward its full detail
     view = learnable_images[target_index]()
-    loss = TARGET_WEIGHT * TARGET_LOSS_SCALE * F.mse_loss(blur(view), target_blurred)
+    loss = F.mse_loss(blur(view), target_blurred)
+    if TARGET_DETAIL:
+        loss = loss + TARGET_DETAIL * F.mse_loss(view, target_picture)
+    loss = TARGET_WEIGHT * TARGET_LOSS_SCALE * loss
     loss.backward()
 
 def sd_step(label, learnable_image, weight):
@@ -408,7 +434,7 @@ def save_checkpoint(step):
         negative_prompt   = negative_prompt,
         number_of_squares = NUMBER_OF_SQUARES,
         model_name        = model_name,
-        target            = None if TARGET_IMAGE is None else dict(path=TARGET_IMAGE, view=TARGET_VIEW, weight=TARGET_WEIGHT, blur=TARGET_BLUR),
+        target            = None if TARGET_IMAGE is None else dict(path=TARGET_IMAGE, view=TARGET_VIEW, weight=TARGET_WEIGHT, weight_scale=2, blur=TARGET_BLUR, detail=TARGET_DETAIL),
     ), path + '.tmp')
     os.replace(path + '.tmp', path)
 
