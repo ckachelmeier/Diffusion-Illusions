@@ -1,0 +1,2 @@
+# Shell scripts run on Linux (vast/), so keep them LF even with core.autocrlf on Windows
+*.sh text eol=lf

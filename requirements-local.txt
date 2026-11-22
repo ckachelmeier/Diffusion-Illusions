@@ -8,3 +8,7 @@
 numpy<2          # pandas 1.4.3 / matplotlib 3.5.3 / opencv 4.6 binaries break on numpy 2
 transformers<5   # source/stable_diffusion.py relies on the v4 CLIPTokenizer/CLIPTextModel classes
 ipykernel
+colorama         # imported by illusion_gen/env.py; on Windows tqdm pulls it in, on Linux nothing does
+pyyaml           # config files for generate.py --config
+accelerate       # lets diffusers load models faster and with less memory
+# On Linux (e.g. vast.ai), vast/setup.sh does all of this
